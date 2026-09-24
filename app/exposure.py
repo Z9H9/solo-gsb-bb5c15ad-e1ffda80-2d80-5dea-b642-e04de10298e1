@@ -20,8 +20,10 @@
   对严格高于阈值的子段积分：暴露秒数累加子段时长，暴露面积按梯形累加
   ∫ max(v(t)-threshold, 0) dt；恰在阈值上的部分贡献为零。
 
-时间一律使用整数微秒运算，避免浮点秒比较误差；不足两条读数时无法
-构成任何线段，暴露秒数与面积均为 0。
+时间比较一律使用整数微秒运算，避免浮点秒比较误差；线段内的裁剪、
+阈值交点切分与梯形积分使用相对首端点的微秒坐标，避免 UTC 纪元绝对
+微秒（远期时间量级达 1e16）转浮点后丢失微秒分辨率。不足两条读数时
+无法构成任何线段，暴露秒数与面积均为 0。
 """
 
 import json
@@ -137,32 +139,38 @@ def _integrate_segment(
 
     返回 (暴露微秒数, 暴露面积)；面积单位为 读数单位·微秒，由调用方换算。
     线段须已与 [lo, hi) 求交，区间内严格线性。恰在阈值上的部分不计。
+
+    线段内部一律使用相对首端点的微秒坐标 x = t - t0（0..span），裁剪端点
+    也先换算成相对坐标再转浮点：这样切分与求交只涉及线段时间跨度量级的数，
+    不携带 UTC 纪元绝对微秒（2300 年附近约 1e16，相邻 1 微秒转 float64
+    会被 ULP 吞没），保证微秒分辨率不随绝对时刻退化。
     """
-    lo_us = max(lo_us, t0_us)
-    hi_us = min(hi_us, t1_us)
-    if hi_us <= lo_us:
+    lo = max(lo_us, t0_us)
+    hi = min(hi_us, t1_us)
+    if hi <= lo:
         return 0, 0.0
 
     span_us = t1_us - t0_us
     slope = (v1 - v0) / span_us
 
-    # 收集全部切分时刻：裁剪端点（整数微秒）+ 阈值交点（浮点微秒）
-    cuts = [float(lo_us), float(hi_us)]
+    # 裁剪端点先换算为相对首端点的整数微秒，再转浮点；阈值交点同样在
+    # 相对坐标上求出，全程不出现绝对纪元微秒的浮点表示
+    cuts = [float(lo - t0_us), float(hi - t0_us)]
     if (v0 - threshold) * (v1 - threshold) < 0:
-        cross_us = t0_us + (threshold - v0) / slope
-        if lo_us < cross_us < hi_us:
-            cuts.append(cross_us)
+        cross_x = (threshold - v0) / slope
+        if (lo - t0_us) < cross_x < (hi - t0_us):
+            cuts.append(cross_x)
     cuts.sort()
 
     over_us = 0.0
     area = 0.0
     for a, b in zip(cuts, cuts[1:]):
         mid = (a + b) / 2.0
-        v_mid = v0 + slope * (mid - t0_us)
+        v_mid = v0 + slope * mid
         if v_mid <= threshold:
             continue  # 子段在阈值下方（恰在阈值上贡献亦为零）
-        va = v0 + slope * (a - t0_us) - threshold
-        vb = v0 + slope * (b - t0_us) - threshold
+        va = v0 + slope * a - threshold
+        vb = v0 + slope * b - threshold
         # 数值误差保护：阈值交点处可能出现 -1e-15 量级的负值
         if va < 0 and abs(va) < 1e-9:
             va = 0.0

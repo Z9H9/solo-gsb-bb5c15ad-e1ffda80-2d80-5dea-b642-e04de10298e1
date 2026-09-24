@@ -478,6 +478,74 @@ def test_metric_filter(client):
 
 
 # ---------------------------------------------------------------------------
+# 远期时间的微秒分辨率：相对坐标积分，绝对纪元微秒转 float64 不吞精度
+# ---------------------------------------------------------------------------
+
+def test_one_microsecond_segment_far_future_keeps_resolution(client):
+    # 2300-01-01 附近自 UTC epoch 的绝对微秒约 1.04e16，float64 的 ULP
+    # 约为 2，相邻 1 微秒转浮点后相等；线段运算须以相对首端点的微秒
+    # 坐标进行。读数 2、2、阈值 1 的 1 微秒线段应得 0.000001 秒、
+    # 0.000001 面积（超阈幅度恒为 1）。
+    client.post("/api/v1/packages", json=pkg(1, "1", [
+        m(2.0, ts="2300-01-01T00:00:00.000000Z"),
+    ]))
+    client.post("/api/v1/packages", json=pkg(2, "2", [
+        m(2.0, ts="2300-01-01T00:00:00.000001Z"),
+    ]))
+    body = exposure(client, threshold=1, max_gap_seconds=60, **{
+        "from": "2300-01-01T00:00:00.000000Z",
+        "to": "2300-01-01T00:00:00.000002Z",
+    }).json()
+    assert body["sample_count"] == 2
+    assert body["segment_count"] == 1
+    assert body["exposure_seconds"] == pytest.approx(0.000001)
+    assert body["exposure_area"] == pytest.approx(0.000001)
+
+
+def test_one_microsecond_crossing_segment_far_future_splits(client):
+    # 同一远期时刻：0 → 2 的 1 微秒线段在 0.5us 处穿越阈值 1，
+    # 只积分实际超阈的后半段：0.5us = 0.0000005 秒；
+    # 面积为三角形 1·0.5us/2 = 0.25 读数单位·微秒 = 0.00000025。
+    client.post("/api/v1/packages", json=pkg(1, "1", [
+        m(0.0, ts="2300-01-01T00:00:00.000000Z"),
+    ]))
+    client.post("/api/v1/packages", json=pkg(2, "2", [
+        m(2.0, ts="2300-01-01T00:00:00.000001Z"),
+    ]))
+    body = exposure(client, threshold=1, max_gap_seconds=60, **{
+        "from": "2300-01-01T00:00:00.000000Z",
+        "to": "2300-01-01T00:00:00.000002Z",
+    }).json()
+    assert body["segment_count"] == 1
+    assert body["exposure_seconds"] == pytest.approx(0.0000005)
+    assert body["exposure_area"] == pytest.approx(0.00000025)
+
+
+def test_far_future_window_clipping_keeps_microseconds(client):
+    # 三条相距 1 微秒的读数（均为 2、阈值 1）：窗口恰为中间线段
+    # [t1, t2)。前段终点恰在 from 上被半开裁剪排除；中间 1us 线段
+    # 完整落入窗口，远期绝对微秒下裁剪仍须保住这 1 微秒。
+    client.post("/api/v1/packages", json=pkg(1, "1", [
+        m(2.0, ts="2299-12-31T23:59:59.999999Z"),
+    ]))
+    client.post("/api/v1/packages", json=pkg(2, "2", [
+        m(2.0, ts="2300-01-01T00:00:00.000000Z"),
+    ]))
+    client.post("/api/v1/packages", json=pkg(3, "3", [
+        m(2.0, ts="2300-01-01T00:00:00.000001Z"),
+    ]))
+    # 窗口恰为中间 1 微秒线段 [t1, t2)：半开右端不含 t2 之后的延伸
+    body = exposure(client, threshold=1, max_gap_seconds=60, **{
+        "from": "2300-01-01T00:00:00.000000Z",
+        "to": "2300-01-01T00:00:00.000001Z",
+    }).json()
+    assert body["sample_count"] == 3
+    assert body["segment_count"] == 1
+    assert body["exposure_seconds"] == pytest.approx(0.000001)
+    assert body["exposure_area"] == pytest.approx(0.000001)
+
+
+# ---------------------------------------------------------------------------
 # 空数据 / 参数校验 / 404 / 只读
 # ---------------------------------------------------------------------------
 
