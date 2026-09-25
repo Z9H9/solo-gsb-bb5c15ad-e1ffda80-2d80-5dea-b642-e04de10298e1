@@ -20,8 +20,10 @@
   对严格高于阈值的子段积分：暴露秒数累加子段时长，暴露面积按梯形累加
   ∫ max(v(t)-threshold, 0) dt；恰在阈值上的部分贡献为零。
 
-时间一律使用整数微秒运算，避免浮点秒比较误差；不足两条读数时无法
-构成任何线段，暴露秒数与面积均为 0。
+时间一律使用整数微秒运算，避免浮点秒比较误差；线段内部的切分与求值
+改用相对线段首端点的微秒坐标——绝对纪元微秒在远未来（约 2255 年起）
+超过 2^53，直接转浮点会把相距 1 微秒的端点坍缩成同一数值，导致整段
+积分丢失。不足两条读数时无法构成任何线段，暴露秒数与面积均为 0。
 """
 
 import json
@@ -137,6 +139,10 @@ def _integrate_segment(
 
     返回 (暴露微秒数, 暴露面积)；面积单位为 读数单位·微秒，由调用方换算。
     线段须已与 [lo, hi) 求交，区间内严格线性。恰在阈值上的部分不计。
+
+    内部全部换算成相对首端点 t0 的微秒坐标再转浮点：绝对纪元微秒在
+    远未来超过 2^53 后无法被 float64 区分（如 2300 年前后 1 微秒间距
+    坍缩为同一浮点），相对坐标受 max_gap 限制、量级小，可精确表示。
     """
     lo_us = max(lo_us, t0_us)
     hi_us = min(hi_us, t1_us)
@@ -146,23 +152,25 @@ def _integrate_segment(
     span_us = t1_us - t0_us
     slope = (v1 - v0) / span_us
 
-    # 收集全部切分时刻：裁剪端点（整数微秒）+ 阈值交点（浮点微秒）
-    cuts = [float(lo_us), float(hi_us)]
+    # 收集全部切分时刻（相对 t0 的微秒）：裁剪端点（整数差）+ 阈值交点（浮点）
+    lo_rel = lo_us - t0_us
+    hi_rel = hi_us - t0_us
+    cuts = [float(lo_rel), float(hi_rel)]
     if (v0 - threshold) * (v1 - threshold) < 0:
-        cross_us = t0_us + (threshold - v0) / slope
-        if lo_us < cross_us < hi_us:
-            cuts.append(cross_us)
+        cross_rel = (threshold - v0) / slope
+        if lo_rel < cross_rel < hi_rel:
+            cuts.append(cross_rel)
     cuts.sort()
 
     over_us = 0.0
     area = 0.0
     for a, b in zip(cuts, cuts[1:]):
         mid = (a + b) / 2.0
-        v_mid = v0 + slope * (mid - t0_us)
+        v_mid = v0 + slope * mid
         if v_mid <= threshold:
             continue  # 子段在阈值下方（恰在阈值上贡献亦为零）
-        va = v0 + slope * (a - t0_us) - threshold
-        vb = v0 + slope * (b - t0_us) - threshold
+        va = v0 + slope * a - threshold
+        vb = v0 + slope * b - threshold
         # 数值误差保护：阈值交点处可能出现 -1e-15 量级的负值
         if va < 0 and abs(va) < 1e-9:
             va = 0.0

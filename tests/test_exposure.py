@@ -207,6 +207,66 @@ def test_reading_exactly_at_to_no_contribution(client):
 
 
 # ---------------------------------------------------------------------------
+# 微秒级积分精度：远未来绝对纪元微秒转浮点坍缩的回归
+# ---------------------------------------------------------------------------
+
+def test_microsecond_segment_far_future_fully_above(client):
+    # 2300-01-01 附近相距 1 微秒的两条读数（值 2、2，阈值 1）：
+    # 绝对纪元微秒约 1.04e16 超过 2^53，若直接转浮点两端点坍缩为同一值、
+    # 整段错误积分为 0；相对首端点坐标下 1µs 段全程超阈：1e-6 秒、面积 1e-6
+    client.post("/api/v1/packages", json=pkg(1, "1", [
+        m(2.0, ts="2300-01-01T00:00:00.000000Z"),
+    ]))
+    client.post("/api/v1/packages", json=pkg(2, "2", [
+        m(2.0, ts="2300-01-01T00:00:00.000001Z"),
+    ]))
+    body = exposure(client, threshold=1, **{
+        "from": "2300-01-01T00:00:00Z",
+        "to": "2300-01-01T00:00:01Z",
+    }).json()
+    assert body["sample_count"] == 2
+    assert body["segment_count"] == 1
+    assert body["exposure_seconds"] == pytest.approx(0.000001)
+    assert body["exposure_area"] == pytest.approx(0.000001)
+
+
+def test_microsecond_segment_far_future_crossing(client):
+    # 同样相距 1µs，值 0→2、阈值 1：交点在中点 0.5µs 处，仅后半段超阈——
+    # 超阈 0.5µs，面积三角 0.5µs×1/2 = 0.25µs（只积分实际超阈部分）
+    client.post("/api/v1/packages", json=pkg(1, "1", [
+        m(0.0, ts="2300-01-01T00:00:00.000000Z"),
+    ]))
+    client.post("/api/v1/packages", json=pkg(2, "2", [
+        m(2.0, ts="2300-01-01T00:00:00.000001Z"),
+    ]))
+    body = exposure(client, threshold=1, **{
+        "from": "2300-01-01T00:00:00Z",
+        "to": "2300-01-01T00:00:01Z",
+    }).json()
+    assert body["segment_count"] == 1
+    assert body["exposure_seconds"] == pytest.approx(0.0000005)
+    assert body["exposure_area"] == pytest.approx(0.00000025)
+
+
+def test_microsecond_segment_far_future_window_clip(client):
+    # 远未来 2µs 段（值恒 2、阈值 1），窗口 [t0+1µs, t0+2µs) 裁掉前半：
+    # 超阈 1µs、面积 1µs——相对坐标下 [from, to) 边界裁剪仍然精确
+    client.post("/api/v1/packages", json=pkg(1, "1", [
+        m(2.0, ts="2300-01-01T00:00:00.000000Z"),
+    ]))
+    client.post("/api/v1/packages", json=pkg(2, "2", [
+        m(2.0, ts="2300-01-01T00:00:00.000002Z"),
+    ]))
+    body = exposure(client, threshold=1, **{
+        "from": "2300-01-01T00:00:00.000001Z",
+        "to": "2300-01-01T00:00:00.000002Z",
+    }).json()
+    assert body["segment_count"] == 1
+    assert body["exposure_seconds"] == pytest.approx(0.000001)
+    assert body["exposure_area"] == pytest.approx(0.000001)
+
+
+# ---------------------------------------------------------------------------
 # 范围外相邻读数参与边界插值
 # ---------------------------------------------------------------------------
 
